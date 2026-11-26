@@ -566,3 +566,121 @@ describe('avatar popup color schema', () => {
     expect(LIGHT_PALETTE.aiGradient).toBe('linear-gradient(90deg, #10b981, #06b6d4)')
   })
 })
+
+describe('HuaqiuAuthSidebarAction (quota-reset reminder)', () => {
+  const RECORD_KEY = 'huaqiu.dsh.auth.reset-grants'
+  type GrantView = { count: number; pendingGrantId: number | null }
+
+  /** One stub whose getResetGrants() answers each call from `views` in order. */
+  function grantsStub(views: Array<GrantView | null>) {
+    const base = stubAuth({ id: 'u1', token: 'tok', nickname: '老铁' })
+    const getResetGrants = vi.fn(async () => views.shift() ?? null)
+    const useResetGrant = vi.fn(async () => undefined)
+    return {
+      stub: { ...base, getResetGrants, useResetGrant } as never,
+      getResetGrants,
+      useResetGrant,
+    }
+  }
+
+  async function mountWith(views: Array<GrantView | null>, record?: { count: number; time: number }) {
+    if (record) window.localStorage.setItem(RECORD_KEY, JSON.stringify(record))
+    else window.localStorage.removeItem(RECORD_KEY)
+    const grants = grantsStub(views)
+    registerAuth(grants.stub)
+    const container = render()
+    // Flush the store's getUserInfo() and the session-start grants fetch.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
+    return { container, ...grants }
+  }
+
+  function reminder(): HTMLElement | null {
+    return document.body.querySelector('[role="status"]')
+  }
+
+  it('reads the count once on entering signed in, not when the menu opens', async () => {
+    const { container, getResetGrants } = await mountWith([{ count: 2, pendingGrantId: 7 }])
+    expect(getResetGrants).toHaveBeenCalledTimes(1)
+    click(trigger(container))
+    expect(menu()).not.toBeNull()
+    expect(getResetGrants).toHaveBeenCalledTimes(1)
+    expect(menu()?.textContent).toContain('2次')
+    expect(menu()?.textContent).toContain('兑换')
+  })
+
+  it('shows the avatar reminder with no local record and clears it only via ×', async () => {
+    const { container } = await mountWith([{ count: 1, pendingGrantId: 9 }])
+    expect(reminder()?.textContent).toContain('新增了AI额度重置机会')
+    // The bubble yields to the account menu, but that is NOT an acknowledgement.
+    click(trigger(container))
+    expect(reminder()).toBeNull()
+    expect(window.localStorage.getItem(RECORD_KEY)).toBeNull()
+    click(trigger(container))
+    expect(reminder()).not.toBeNull()
+    const close = reminder()?.querySelector('button')
+    if (!close) throw new Error('reminder dismiss button not found')
+    click(close)
+    expect(reminder()).toBeNull()
+    const saved = JSON.parse(window.localStorage.getItem(RECORD_KEY) ?? 'null')
+    expect(saved.count).toBe(1)
+    expect(typeof saved.time).toBe('number')
+  })
+
+  it('reminds when the API count rises above the acknowledged baseline', async () => {
+    await mountWith([{ count: 2, pendingGrantId: 9 }], { count: 1, time: Date.now() })
+    expect(reminder()).not.toBeNull()
+  })
+
+  it('stays quiet when the acknowledged baseline is current or higher', async () => {
+    await mountWith([{ count: 2, pendingGrantId: 9 }], { count: 3, time: Date.now() })
+    expect(reminder()).toBeNull()
+  })
+
+  it('re-reads the count after a redemption and keeps the baseline in step', async () => {
+    const { container, getResetGrants, useResetGrant } = await mountWith(
+      [{ count: 2, pendingGrantId: 9 }, { count: 1, pendingGrantId: 10 }],
+      { count: 2, time: Date.now() },
+    )
+    click(trigger(container))
+    const redeem = [...document.body.querySelectorAll('[role="menu"] button')].find(
+      (el) => el.textContent?.trim() === '兑换',
+    )
+    if (!redeem) throw new Error('redeem button not found')
+    click(redeem)
+    // The styled dialog owns the confirmation; nothing is consumed yet.
+    const dialog = document.body.querySelector('[role="dialog"]')
+    expect(dialog?.textContent).toContain('兑换后不可撤销')
+    expect(useResetGrant).not.toHaveBeenCalled()
+    const confirm = [...(dialog?.querySelectorAll('button') ?? [])].find(
+      (el) => el.textContent?.trim() === '确认',
+    )
+    if (!confirm) throw new Error('confirm button not found')
+    click(confirm)
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
+    expect(useResetGrant).toHaveBeenCalledWith(9)
+    expect(getResetGrants).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(window.localStorage.getItem(RECORD_KEY) ?? 'null').count).toBe(1)
+  })
+
+  it('cancels the redemption without consuming a grant', async () => {
+    const { container, getResetGrants, useResetGrant } = await mountWith(
+      [{ count: 2, pendingGrantId: 9 }, { count: 2, pendingGrantId: 9 }],
+      { count: 2, time: Date.now() },
+    )
+    click(trigger(container))
+    const redeem = [...document.body.querySelectorAll('[role="menu"] button')].find(
+      (el) => el.textContent?.trim() === '兑换',
+    )
+    if (!redeem) throw new Error('redeem button not found')
+    click(redeem)
+    const cancel = [...(document.body.querySelector('[role="dialog"]')?.querySelectorAll('button') ?? [])].find(
+      (el) => el.textContent?.trim() === '取消',
+    )
+    if (!cancel) throw new Error('cancel button not found')
+    click(cancel)
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull()
+    expect(useResetGrant).not.toHaveBeenCalled()
+    expect(getResetGrants).toHaveBeenCalledTimes(1)
+  })
+})

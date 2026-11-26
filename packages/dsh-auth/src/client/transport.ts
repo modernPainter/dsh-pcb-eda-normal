@@ -4,7 +4,7 @@
  * browser→host channel — `apiProxy`'s dispatch table is closed, so a
  * plugin-owned `webServer` route is the smallest supported extension point.
  */
-import type { AiUsage, AuthTokenPayload } from './lib.js'
+import type { AiUsage, AuthTokenPayload, ResetGrantsView, ResetUseResultVO } from './lib.js'
 
 export interface AuthTransport {
   pushSession(info: AuthTokenPayload): Promise<void>
@@ -60,6 +60,23 @@ export interface AuthTransport {
    * Null on failure (the sidebar shows「—」).
    */
   fetchAiUsage(): Promise<AiUsage | null>
+  /**
+   * Pending quota-reset grants from the node half (`/reset-grants`), which
+   * performs the upstream `/user-rest/api/ai/reset/my` call with the resolved
+   * credential and `HQ_AI_ENV` origin. Null on any failure — the account menu
+   * shows「—」instead of a guessed number.
+   *
+   * Optional so any transport built before this seam (e.g. a test stub or an
+   * older harness) still satisfies the interface.
+   */
+  fetchResetGrants?(): Promise<ResetGrantsView | null>
+  /**
+   * Consume one pending grant through the node half
+   * (`POST /reset-grants/use`, body `{ grantId }`). Returns null when the
+   * upstream refused or the payload was unusable; callers re-read the count
+   * afterwards regardless of the outcome.
+   */
+  useResetGrant?(grantId: number): Promise<ResetUseResultVO | null>
 }
 
 /** Minimal session user shape returned by the node `/session` route. */
@@ -114,6 +131,24 @@ function normalizeUsage(value: unknown): AiUsage | null {
   const percent = (value as { quotaRemainPercent?: unknown }).quotaRemainPercent
   return typeof percent === 'number' && Number.isFinite(percent)
     ? { quotaRemainPercent: percent }
+    : null
+}
+
+/** Accept only a finite count and a numeric-or-null pending grant id. */
+function normalizeResetGrants(value: unknown): ResetGrantsView | null {
+  if (value === null || typeof value !== 'object') return null
+  const record = value as { count?: unknown; pendingGrantId?: unknown }
+  if (typeof record.count !== 'number' || !Number.isFinite(record.count)) return null
+  const id = record.pendingGrantId
+  if (id !== null && (typeof id !== 'number' || !Number.isFinite(id))) return null
+  return { count: record.count, pendingGrantId: id as number | null }
+}
+
+function normalizeResetUse(value: unknown): ResetUseResultVO | null {
+  if (value === null || typeof value !== 'object') return null
+  const grantId = (value as { grantId?: unknown }).grantId
+  return typeof grantId === 'number' && Number.isFinite(grantId)
+    ? value as ResetUseResultVO
     : null
 }
 
@@ -250,6 +285,33 @@ export function createWebServerAuthTransport(
         if (!res.ok) return null
         const body = await res.json() as { usage?: unknown }
         return normalizeUsage(body.usage)
+      } catch {
+        return null
+      }
+    },
+    async fetchResetGrants() {
+      try {
+        const res = await doFetch(`${base}/reset-grants`, {
+          method: 'GET',
+          headers: { accept: 'application/json' },
+        })
+        if (!res.ok) return null
+        const body = await res.json() as { grants?: unknown }
+        return normalizeResetGrants(body.grants)
+      } catch {
+        return null
+      }
+    },
+    async useResetGrant(grantId) {
+      try {
+        const res = await doFetch(`${base}/reset-grants/use`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', accept: 'application/json' },
+          body: JSON.stringify({ grantId }),
+        })
+        if (!res.ok) return null
+        const body = await res.json() as { result?: unknown }
+        return normalizeResetUse(body.result)
       } catch {
         return null
       }

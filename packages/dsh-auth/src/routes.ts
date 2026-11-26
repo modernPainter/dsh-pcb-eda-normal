@@ -8,6 +8,8 @@
  *   GET  /api/v1/huaqiu/auth/config    → { hostMode, subscriptionOrigin, subscriptionApiBaseUrl }
  *   GET  /api/v1/huaqiu/auth/user-info → { userInfo } (node-side eda.cn call)
  *   GET  /api/v1/huaqiu/auth/ai-usage  → { usage }    (node-side subscription-balances call)
+ *   GET  /api/v1/huaqiu/auth/reset-grants     → { grants }       (node-side reset-grants call)
+ *   POST /api/v1/huaqiu/auth/reset-grants/use → { ok, result }   (node-side reset use call)
  *
  * `config` tells the browser half whether it is running under an HQ Edge host
  * (hq-edge passes the operator credential to hq-edge itself, so the sidebar
@@ -21,6 +23,14 @@ import { getLogger, type PluginLogger } from '@huaqiu/dsh-plugin-log'
 import type { HuaqiuAuthService, HuaqiuUserInfo } from './service.js'
 import { HostLoginIncompleteError } from './service.js'
 import { aiUsageFromPayload, type AiUsage } from './subscription-balances.js'
+import {
+  buildResetGrantsUrl,
+  buildResetUseUrl,
+  parseResetUsePayload,
+  resetGrantsViewFromPayload,
+  type ResetGrantsView,
+  type ResetUseResultVO,
+} from './reset-grants.js'
 
 // Lazy so test suites that `vi.mock('@deepseek-ai/dsh-home-paths', …)` before
 // their TMP constant is initialised don't trigger `dshHomePath('logs')` at
@@ -155,6 +165,126 @@ export async function fetchAiUsage(
   } finally {
     clearTimeout(timer)
     options.signal?.removeEventListener('abort', onAbort)
+  }
+}
+
+// ── AI quota-reset grants (proxied by the node half) ─────────────────────────
+
+/** Upstream budget for one reset-grants/use call. */
+export const RESET_TIMEOUT_MS = 10_000
+
+/**
+ * Combine an outer abort signal (the browser closing the loopback response)
+ * with an upstream timeout. Kept local to the reset calls so the existing
+ * `/ai-usage` fetch stays untouched.
+ */
+function abortAfter(timeoutMs: number, outer?: AbortSignal): { signal: AbortSignal; dispose: () => void } {
+  const controller = new AbortController()
+  const onAbort = () => controller.abort(outer?.reason)
+  if (outer) {
+    if (outer.aborted) controller.abort(outer.reason)
+    else outer.addEventListener('abort', onAbort, { once: true })
+  }
+  const timer = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs)
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      clearTimeout(timer)
+      outer?.removeEventListener('abort', onAbort)
+    },
+  }
+}
+
+/**
+ * Fetch the pending quota-reset grants for a token.
+ *
+ * The upstream API is the one `homeForEDA`'s `getMyResetGrants()` uses:
+ * `GET {origin}/user-rest/api/ai/reset/my?status=0` with the `X-Token`
+ * header. The origin is the SAME `HQ_AI_ENV`-resolved base used by the
+ * subscription API (`service.subscriptionApiBaseUrl`), so prod/test never mix.
+ * The WebView cannot call it directly (plain http on TEST → ATS + CORS).
+ *
+ * `null` on any failure (invalid payload, timeout, network, non-2xx) so the
+ * menu degrades to「—」; never throws.
+ */
+export async function fetchResetGrants(
+  token: string,
+  baseUrl: string,
+  doFetch: typeof fetch = globalThis.fetch.bind(globalThis),
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<ResetGrantsView | null> {
+  const url = buildResetGrantsUrl(baseUrl)
+  const host = safeHost(url)
+  const { signal, dispose } = abortAfter(options.timeoutMs ?? RESET_TIMEOUT_MS, options.signal)
+  try {
+    const res = await doFetch(url, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        'X-Token': token,
+      },
+      signal,
+    })
+    if (!res.ok) {
+      log().warn('reset grants request failed', { host, status: res.status })
+      return null
+    }
+    const grants = resetGrantsViewFromPayload(await res.json())
+    if (!grants) log().warn('reset grants payload unusable', { host })
+    return grants
+  } catch (err) {
+    log().warn('reset grants request failed', {
+      host,
+      error: String((err as Error)?.message || err),
+    })
+    return null
+  } finally {
+    dispose()
+  }
+}
+
+/**
+ * Consume one pending grant (`POST {origin}/user-rest/api/ai/reset/use` with
+ * `{ grantId }`). A successful business response with an empty result still
+ * counts as used — the upstream may already have consumed it, and the caller
+ * re-reads the count afterwards either way. `null` on any failure.
+ */
+export async function postResetGrantUse(
+  token: string,
+  baseUrl: string,
+  grantId: number,
+  doFetch: typeof fetch = globalThis.fetch.bind(globalThis),
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<ResetUseResultVO | null> {
+  const url = buildResetUseUrl(baseUrl)
+  const host = safeHost(url)
+  const { signal, dispose } = abortAfter(options.timeoutMs ?? RESET_TIMEOUT_MS, options.signal)
+  try {
+    const res = await doFetch(url, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'X-Token': token,
+      },
+      body: JSON.stringify({ grantId }),
+      signal,
+    })
+    if (!res.ok) {
+      log().warn('reset use request failed', { host, status: res.status })
+      return null
+    }
+    const result = parseResetUsePayload(await res.json(), grantId)
+    if (!result) log().warn('reset use payload unusable', { host })
+    return result
+  } catch (err) {
+    log().warn('reset use request failed', {
+      host,
+      error: String((err as Error)?.message || err),
+    })
+    return null
+  } finally {
+    dispose()
   }
 }
 
@@ -311,6 +441,51 @@ export function createAuthHandler(service: HuaqiuAuthService): AuthHandler {
           res.off('close', onClose)
         }
         sendJson(res, 200, { usage })
+        return
+      }
+
+      if (req.method === 'GET' && pathname === `${AUTH_ROUTE_PREFIX}/reset-grants`) {
+        // Same origin + credential resolution as /ai-usage: the node half
+        // owns the upstream call, the browser reads a same-origin route.
+        const token = await service.auth.getAccessToken()
+        if (!token || !service.subscriptionApiBaseUrl) {
+          sendJson(res, 200, { grants: null })
+          return
+        }
+        const controller = new AbortController()
+        const onClose = () => controller.abort()
+        res.on('close', onClose)
+        let grants: ResetGrantsView | null
+        try {
+          grants = await fetchResetGrants(
+            token,
+            service.subscriptionApiBaseUrl,
+            globalThis.fetch.bind(globalThis),
+            { signal: controller.signal },
+          )
+        } finally {
+          res.off('close', onClose)
+        }
+        sendJson(res, 200, { grants })
+        return
+      }
+
+      if (req.method === 'POST' && pathname === `${AUTH_ROUTE_PREFIX}/reset-grants/use`) {
+        const body = JSON.parse(await readBody(req) || '{}') as Record<string, unknown>
+        const grantId = typeof body.grantId === 'number'
+          && Number.isInteger(body.grantId)
+          && body.grantId > 0 ? body.grantId : null
+        if (grantId === null) {
+          sendJson(res, 400, { ok: false, result: null })
+          return
+        }
+        const token = await service.auth.getAccessToken()
+        if (!token || !service.subscriptionApiBaseUrl) {
+          sendJson(res, 502, { ok: false, result: null })
+          return
+        }
+        const result = await postResetGrantUse(token, service.subscriptionApiBaseUrl, grantId)
+        sendJson(res, result ? 200 : 502, { ok: result !== null, result })
         return
       }
 

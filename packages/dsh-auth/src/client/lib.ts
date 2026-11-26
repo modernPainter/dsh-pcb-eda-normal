@@ -75,6 +75,13 @@ export const ERC_PRODUCT_CODE = 'erc'
 export type { AiUsage } from '../subscription-balances.js'
 
 /**
+ * Client-facing reset-grants contract. Re-exported (type-only) from the single
+ * authoritative contract in `../reset-grants.js`; the browser half only reads
+ * the node-proxied result and never calls the upstream endpoint itself.
+ */
+export type { ResetGrantsView, ResetUseResultVO } from '../reset-grants.js'
+
+/**
  * Build the subscription landing URL. Mirrors `buildProfileUrl`: the token is
  * always attached — the subscription page consumes it to establish the
  * session and hides it itself. `encodeURIComponent` is required (tokens are

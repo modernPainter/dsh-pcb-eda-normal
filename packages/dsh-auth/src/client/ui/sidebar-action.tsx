@@ -30,7 +30,7 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { getAuth, getAuthState, getHqEdge, setProfile, subscribeAuth } from '../auth-state.js'
-import { buildProfileUrl, ERC_PRODUCT_CODE, GEN_PRODUCT_CODE, type AiUsage, type SubscriptionQuota } from '../lib.js'
+import { buildProfileUrl, ERC_PRODUCT_CODE, GEN_PRODUCT_CODE, type AiUsage, type ResetGrantsView, type SubscriptionQuota } from '../lib.js'
 import { useIsDark, useLocale } from '../ui-env.js'
 import { useT, type Translate } from '../i18n.js'
 import { HQ_ICON } from './hq-icon.jsx'
@@ -41,6 +41,40 @@ export interface SidebarFooterActionOwnerProps {
 
 const AVATAR_SIZE = 26
 const ICON_SIZE = 22
+
+/**
+ * Local baseline behind the「新增了AI额度重置机会」avatar reminder. A reminder
+ * is owed when no record exists yet, or when the API reports MORE pending
+ * resets than the count the user last acknowledged. `time` is stored for
+ * diagnostics only — it never expires the record.
+ */
+const RESET_RECORD_KEY = 'huaqiu.dsh.auth.reset-grants'
+
+interface ResetGrantRecord {
+  count: number
+  time: number
+}
+
+function readResetGrantRecord(): ResetGrantRecord | null {
+  try {
+    const raw = window.localStorage.getItem(RESET_RECORD_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as { count?: unknown; time?: unknown } | null
+    if (!parsed || typeof parsed.count !== 'number' || !Number.isFinite(parsed.count) || parsed.count < 0) return null
+    return { count: parsed.count, time: typeof parsed.time === 'number' ? parsed.time : 0 }
+  } catch {
+    return null
+  }
+}
+
+function writeResetGrantRecord(count: number): void {
+  try {
+    const record: ResetGrantRecord = { count, time: Date.now() }
+    window.localStorage.setItem(RESET_RECORD_KEY, JSON.stringify(record))
+  } catch {
+    // Private mode / quota exceeded: the reminder simply stays available.
+  }
+}
 
 /**
  * The popup's color schema. Every painted value comes from here, so the dark
@@ -204,6 +238,52 @@ const MENU_BASE: CSSProperties = {
   fontSize: 13,
 }
 
+/** Avatar reminder tooltip — sits above the avatar, arrow pointing down. */
+const REMINDER_BASE: CSSProperties = {
+  position: 'fixed',
+  zIndex: 2147483001,
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  maxWidth: 260,
+  padding: '8px 10px',
+  borderWidth: 1,
+  borderStyle: 'solid',
+  borderRadius: 10,
+  fontFamily: 'inherit',
+  fontSize: 12,
+  fontWeight: 500,
+  lineHeight: 1.4,
+  whiteSpace: 'nowrap',
+  boxSizing: 'border-box',
+}
+
+/** Redemption confirmation — a body-level dialog, never inside the menu. */
+const CONFIRM_OVERLAY_BASE: CSSProperties = {
+  position: 'fixed',
+  inset: 0,
+  zIndex: 2147483002,
+  display: 'flex',
+  alignItems: 'flex-start',
+  justifyContent: 'center',
+  padding: '22vh 16px 16px',
+  background: 'rgba(0, 0, 0, 0.55)',
+  fontFamily: 'inherit',
+  boxSizing: 'border-box',
+}
+
+const CONFIRM_CARD_BASE: CSSProperties = {
+  width: 300,
+  maxWidth: '100%',
+  padding: 20,
+  borderWidth: 1,
+  borderStyle: 'solid',
+  borderRadius: 16,
+  fontSize: 13,
+  lineHeight: 1.6,
+  boxSizing: 'border-box',
+}
+
 const MENU_HEADER_BASE: CSSProperties = {
   padding: '6px 10px 8px',
   fontSize: 12,
@@ -225,6 +305,25 @@ const MENU_ITEM_BASE: CSSProperties = {
   fontSize: 13,
   textAlign: 'left',
   cursor: 'pointer',
+}
+
+/** Solid brand-coloured button for the quota-reset metric card. */
+function resetButtonStyle(palette: Palette, disabled: boolean): CSSProperties {
+  return {
+    padding: '6px 14px',
+    border: 'none',
+    borderRadius: 8,
+    background: palette.primary,
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: 600,
+    fontFamily: 'inherit',
+    lineHeight: 1.4,
+    whiteSpace: 'nowrap',
+    cursor: disabled ? 'default' : 'pointer',
+    opacity: disabled ? 0.5 : 1,
+    flexShrink: 0,
+  }
 }
 
 /**
@@ -439,6 +538,52 @@ function SparklesIcon({ color }: { color: string }): React.JSX.Element {
   )
 }
 
+/** Quota-reset metric glyph (lucide `rotate-ccw`) — same size as the AI glyph. */
+function ResetIcon(): React.JSX.Element {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={14}
+      height={14}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="#3b82f6"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      style={{ flex: '0 0 auto' }}
+    >
+      <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+      <path d="M3 3v5h5" />
+    </svg>
+  )
+}
+
+/** Redemption confirmation glyph (lucide `gift`), tinted with the brand red. */
+function GiftIcon({ color }: { color: string }): React.JSX.Element {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={16}
+      height={16}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke={color}
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      style={{ flex: '0 0 auto' }}
+    >
+      <rect x="3" y="8" width="18" height="4" rx="1" />
+      <path d="M12 8v13" />
+      <path d="M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7" />
+      <path d="M7.5 8a2.5 2.5 0 0 1 0-5A4.8 8 0 0 1 12 8a4.8 8 0 0 1 4.5-5 2.5 2.5 0 0 1 0 5" />
+    </svg>
+  )
+}
+
 /**
  * One normalized metric reading — everything {@link QuotaMetric} renders.
  *
@@ -464,12 +609,15 @@ function QuotaMetric({
   reading,
   gradient,
   palette,
+  action,
 }: {
   label: string
   icon: React.JSX.Element
   reading: MetricReading | null
   gradient: string
   palette: Palette
+  /** Keeps the card on one row: sits next to the count, bar is not drawn. */
+  action?: React.ReactNode
 }): React.JSX.Element {
   const t = useT()
   const [hovered, setHovered] = useState(false)
@@ -488,28 +636,32 @@ function QuotaMetric({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, fontSize: 12, marginBottom: 6 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, fontSize: 12, marginBottom: action ? 0 : 6 }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 500, color: palette.text, minWidth: 0 }}>
           {icon}
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
         </span>
-        <span
-          style={{
-            fontWeight: 700,
-            color: reading?.ok ? palette.heading : palette.danger,
-            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
-            fontSize: 12,
-            whiteSpace: 'nowrap',
-            flexShrink: 0,
-          }}
-          title={reading?.title ?? value}
-        >
-          {value}
+        <span style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          <span
+            style={{
+              fontWeight: 700,
+              color: reading?.ok ? palette.heading : palette.danger,
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+              fontSize: 12,
+              whiteSpace: 'nowrap',
+            }}
+            title={reading?.title ?? value}
+          >
+            {value}
+          </span>
+          {action}
         </span>
       </div>
-      <div style={{ width: '100%', height: 6, borderRadius: 999, background: palette.track, overflow: 'hidden' }}>
-        <div style={{ width: `${reading?.percent ?? 0}%`, height: '100%', borderRadius: 999, background: gradient }} />
-      </div>
+      {!action && (
+        <div style={{ width: '100%', height: 6, borderRadius: 999, background: palette.track, overflow: 'hidden' }}>
+          <div style={{ width: `${reading?.percent ?? 0}%`, height: '100%', borderRadius: 999, background: gradient }} />
+        </div>
+      )}
     </div>
   )
 }
@@ -724,8 +876,17 @@ export const HuaqiuAuthSidebarAction = memo(function HuaqiuAuthSidebarAction({ w
   const [hovered, setHovered] = useState(false)
   const [quota, setQuota] = useState<{ gen: SubscriptionQuota | null; erc: SubscriptionQuota | null; ai: AiUsage | null } | null>(null)
   const [subscribing, setSubscribing] = useState(false)
+  // Quota-reset grants: a metric card, with a styled body-level dialog owning
+  // the confirmation copy. No prompt/failure text is rendered inside the menu.
+  const [resetGrants, setResetGrants] = useState<ResetGrantsView | null>(null)
+  const [resetBusy, setResetBusy] = useState(false)
+  const [resetDialogOpen, setResetDialogOpen] = useState(false)
+  // Avatar reminder: only the bubble's × acknowledges it, never the menu.
+  const [resetReminder, setResetReminder] = useState(false)
+  const [reminderStyle, setReminderStyle] = useState<CSSProperties | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
+  const confirmRef = useRef<HTMLDivElement | null>(null)
 
   const palette = dark ? DARK_PALETTE : LIGHT_PALETTE
   const authenticated = authState.authenticated
@@ -774,17 +935,24 @@ export const HuaqiuAuthSidebarAction = memo(function HuaqiuAuthSidebarAction({ w
   // Logging out (from anywhere: menu, another tab surface, node invalidation)
   // must never leave an orphan menu pointing at a signed-out account.
   useEffect(() => {
-    if (!authenticated) setMenuOpen(false)
+    if (!authenticated) {
+      setMenuOpen(false)
+      setResetDialogOpen(false)
+    }
   }, [authenticated])
 
   // Live quota: EVERY time the menu opens (and every time the auth state
   // flips to authenticated) re-fetch the active subscription for GEN and ERC
   // from the environment's subscription API, and the AI percentage from the
   // node-proxied subscription balances. All three share one loading window
-  // instead of three staggered ones.
+  // instead of three staggered ones. Reset grants are NOT read here: they come
+  // from the session-start fetch below and the card uses that cached count.
   useEffect(() => {
     if (!menuOpen || !authenticated) {
-      if (!menuOpen) setQuota(null)
+      if (!menuOpen) {
+        setQuota(null)
+        setResetBusy(false)
+      }
       return
     }
     let cancelled = false
@@ -798,6 +966,36 @@ export const HuaqiuAuthSidebarAction = memo(function HuaqiuAuthSidebarAction({ w
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [menuOpen, authenticated])
+
+  // Reset grants are read ONCE when a signed-in session appears — right after
+  // login, or on entering DSH already signed in. A count above the last
+  // acknowledged local baseline (or no baseline at all) raises the avatar
+  // reminder. Only the bubble's × writes the baseline back.
+  useEffect(() => {
+    if (!authenticated) {
+      setResetGrants(null)
+      setResetReminder(false)
+      return
+    }
+    let cancelled = false
+    const authClient = auth
+    // Older harnesses / test stubs may not expose this seam.
+    if (!authClient || typeof authClient.getResetGrants !== 'function') return
+    void (async () => {
+      try {
+        const grants = await authClient.getResetGrants()
+        if (cancelled) return
+        setResetGrants(grants ?? null)
+        if (!grants) return
+        const record = readResetGrantRecord()
+        if (record === null || record.count < grants.count) setResetReminder(true)
+      } catch {
+        if (!cancelled) setResetGrants(null)
+      }
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authenticated])
 
   // Anchor the portalled menu to the trigger before paint: the sidebar footer
   // sits at the bottom edge, so the menu grows UPWARD from the trigger's top.
@@ -817,6 +1015,33 @@ export const HuaqiuAuthSidebarAction = memo(function HuaqiuAuthSidebarAction({ w
     })
   }, [menuOpen, avatar, palette])
 
+  // Sit the reminder directly ABOVE the avatar, with a small arrow pointing
+  // down at it. Portalled to <body> because the sidebar footer clips overflow.
+  // The menu grows upward from the same edge, so the bubble yields to it while
+  // open — the unread state is untouched, only × acknowledges it.
+  useLayoutEffect(() => {
+    if (!resetReminder || !authenticated || !triggerRef.current) {
+      setReminderStyle(null)
+      return
+    }
+    const place = (): void => {
+      const rect = triggerRef.current?.getBoundingClientRect()
+      if (!rect) return
+      setReminderStyle({
+        ...REMINDER_BASE,
+        left: Math.max(8, Math.round(rect.left) + 4),
+        bottom: Math.max(8, Math.round(window.innerHeight - rect.top + 10)),
+        background: palette.surface,
+        borderColor: palette.border,
+        color: palette.text,
+        boxShadow: palette.shadow,
+      })
+    }
+    place()
+    window.addEventListener('resize', place)
+    return () => { window.removeEventListener('resize', place) }
+  }, [resetReminder, authenticated, avatar, palette])
+
   // Close on: outside click, Escape, resize or scroll (the anchor moved).
   useEffect(() => {
     if (!menuOpen) return
@@ -824,9 +1049,13 @@ export const HuaqiuAuthSidebarAction = memo(function HuaqiuAuthSidebarAction({ w
       const target = event.target as Node
       if (triggerRef.current?.contains(target)) return
       if (menuRef.current?.contains(target)) return
+      // The redemption dialog sits above the menu; interacting with it must
+      // not dismiss the menu underneath.
+      if (confirmRef.current?.contains(target)) return
       setMenuOpen(false)
     }
     const onKeyDown = (event: KeyboardEvent): void => {
+      if (resetDialogOpen) return
       if (event.key === 'Escape') setMenuOpen(false)
     }
     const dismiss = (): void => setMenuOpen(false)
@@ -840,7 +1069,17 @@ export const HuaqiuAuthSidebarAction = memo(function HuaqiuAuthSidebarAction({ w
       window.removeEventListener('resize', dismiss)
       window.removeEventListener('scroll', dismiss, true)
     }
-  }, [menuOpen])
+  }, [menuOpen, resetDialogOpen])
+
+  // Escape dismisses the confirmation without redeeming anything.
+  useEffect(() => {
+    if (!resetDialogOpen) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setResetDialogOpen(false)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => { document.removeEventListener('keydown', onKeyDown) }
+  }, [resetDialogOpen])
 
   if (!auth) return null
 
@@ -889,6 +1128,47 @@ export const HuaqiuAuthSidebarAction = memo(function HuaqiuAuthSidebarAction({ w
       .catch(() => { /* host without dialog service — menu stays usable */ })
       .finally(() => setSubscribing(false))
   }
+
+  /**
+   * Consume one pending reset grant, then ALWAYS re-read the count: the
+   * upstream may have consumed the grant even when the response was lost, and
+   * a stale count would invite a second click on an already-used id.
+   * Confirmation lives in a styled body-level dialog — the menu itself never
+   * renders a prompt, a failure hint or a busy label.
+   */
+  const useResetGrant = async (): Promise<void> => {
+    const grantId = resetGrants?.pendingGrantId
+    if (grantId === null || grantId === undefined || resetBusy) return
+    setResetBusy(true)
+    try {
+      await auth?.useResetGrant?.(grantId)
+    } catch {
+      // The count is re-read below either way.
+    } finally {
+      try {
+        const fresh = await auth?.getResetGrants?.()
+        setResetGrants(fresh ?? null)
+        // Keep the acknowledged baseline in step with the redemption. Without
+        // this, a later increase would be compared against a stale, higher
+        // count and never raise the reminder.
+        if (fresh) writeResetGrantRecord(fresh.count)
+      } catch {
+        setResetGrants(null)
+      }
+      setResetBusy(false)
+    }
+  }
+
+  /** × is the only way to acknowledge the avatar reminder. */
+  const dismissResetReminder = (): void => {
+    if (resetGrants) writeResetGrantRecord(resetGrants.count)
+    setResetReminder(false)
+  }
+
+  const canUseReset = resetGrants !== null
+    && resetGrants.count > 0
+    && resetGrants.pendingGrantId !== null
+    && !resetBusy
 
   return (
     <div style={{ position: 'relative', width: '100%' }}>
@@ -957,6 +1237,51 @@ export const HuaqiuAuthSidebarAction = memo(function HuaqiuAuthSidebarAction({ w
         ) : null}
       </button>
 
+      {resetReminder && authenticated && reminderStyle && !menuOpen
+        ? createPortal(
+            <div role="status" style={reminderStyle}>
+              <ResetIcon />
+              <span style={{ flex: '1 1 auto' }}>{t('subscription.resetReminder')}</span>
+              <button
+                type="button"
+                aria-label={t('subscription.resetReminderDismiss')}
+                title={t('subscription.resetReminderDismiss')}
+                onClick={dismissResetReminder}
+                style={{
+                  width: 18,
+                  height: 18,
+                  padding: 0,
+                  border: 'none',
+                  background: 'transparent',
+                  color: palette.muted,
+                  fontFamily: 'inherit',
+                  fontSize: 16,
+                  lineHeight: 1,
+                  cursor: 'pointer',
+                  flexShrink: 0,
+                }}
+              >
+                ×
+              </button>
+              <span
+                aria-hidden
+                style={{
+                  position: 'absolute',
+                  bottom: -6,
+                  left: 20,
+                  width: 10,
+                  height: 10,
+                  background: palette.surface,
+                  borderRight: `1px solid ${palette.border}`,
+                  borderBottom: `1px solid ${palette.border}`,
+                  transform: 'rotate(45deg)',
+                }}
+              />
+            </div>,
+            document.body,
+          )
+        : null}
+
       {menuOpen && menuStyle
         ? createPortal(
             <div ref={menuRef} role="menu" style={menuStyle}>
@@ -988,6 +1313,27 @@ export const HuaqiuAuthSidebarAction = memo(function HuaqiuAuthSidebarAction({ w
                   reading={aiUsageReading(quota?.ai ?? null, t)}
                   gradient={palette.aiGradient}
                   palette={palette}
+                />
+                <QuotaMetric
+                  label={t('subscription.resetLabel')}
+                  icon={<ResetIcon />}
+                  reading={{
+                    value: resetGrants ? t('subscription.resetCount', { count: resetGrants.count }) : '—',
+                    percent: 0,
+                    ok: resetGrants !== null,
+                  }}
+                  gradient={palette.aiGradient}
+                  palette={palette}
+                  action={
+                    <button
+                      type="button"
+                      disabled={!canUseReset}
+                      style={resetButtonStyle(palette, !canUseReset)}
+                      onClick={() => { setResetDialogOpen(true) }}
+                    >
+                      {t('subscription.resetUse')}
+                    </button>
+                  }
                 />
               </div>
               <UpgradeButton
@@ -1037,6 +1383,85 @@ export const HuaqiuAuthSidebarAction = memo(function HuaqiuAuthSidebarAction({ w
                   void auth.logout().catch(() => { /* host refused — stay authenticated */ })
                 }}
               />
+            </div>,
+            document.body,
+          )
+        : null}
+
+      {resetDialogOpen
+        ? createPortal(
+            <div
+              style={CONFIRM_OVERLAY_BASE}
+              onClick={(event) => {
+                if (event.target === event.currentTarget) setResetDialogOpen(false)
+              }}
+            >
+              <div
+                ref={confirmRef}
+                role="dialog"
+                aria-modal="true"
+                aria-label={t('subscription.resetUse')}
+                style={{
+                  ...CONFIRM_CARD_BASE,
+                  background: palette.surface,
+                  borderColor: palette.border,
+                  color: palette.text,
+                  boxShadow: palette.shadow,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                  <span
+                    style={{
+                      width: 32,
+                      height: 32,
+                      borderRadius: 10,
+                      background: palette.metric,
+                      border: `1px solid ${palette.cardBorder}`,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <GiftIcon color={palette.primary} />
+                  </span>
+                  <span style={{ flex: '1 1 auto', paddingTop: 4 }}>
+                    {t('subscription.resetConfirm')}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 20 }}>
+                  <button
+                    type="button"
+                    onClick={() => { setResetDialogOpen(false) }}
+                    style={{
+                      padding: '6px 14px',
+                      border: `1px solid ${palette.border}`,
+                      borderRadius: 8,
+                      background: 'transparent',
+                      color: palette.text,
+                      fontSize: 12,
+                      fontWeight: 600,
+                      fontFamily: 'inherit',
+                      lineHeight: 1.4,
+                      whiteSpace: 'nowrap',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {t('subscription.resetCancel')}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={resetBusy}
+                    style={resetButtonStyle(palette, resetBusy)}
+                    onClick={() => {
+                      setResetDialogOpen(false)
+                      void useResetGrant()
+                    }}
+                  >
+                    {t('subscription.resetConfirmAction')}
+                  </button>
+                </div>
+              </div>
             </div>,
             document.body,
           )

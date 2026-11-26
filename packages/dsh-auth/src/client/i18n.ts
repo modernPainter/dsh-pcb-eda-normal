@@ -50,6 +50,18 @@ const zh = {
   'subscription.ai': 'AI 用量',
   'subscription.aiUsagePercent': '{percent}%',
   'subscription.aiUsageUnknown': '暂无数据',
+  // Quota-reset grants (sidebar account menu).
+  'subscription.resetLabel': '可用重置',
+  'subscription.resetCount': '{count}次',
+  'subscription.resetAvailable': '可用重置：{count}次',
+  'subscription.resetUse': '兑换',
+  'subscription.resetReminder': '新增了AI额度重置机会',
+  'subscription.resetReminderDismiss': '关闭提醒',
+  'subscription.resetConfirm': '确认使用一次重置机会？将重置当前套餐的平台额度与 AI 点数，兑换后不可撤销。',
+  'subscription.resetConfirmAction': '确认',
+  'subscription.resetCancel': '取消',
+  'subscription.resetBusy': '正在重置…',
+  'subscription.resetFailed': '重置失败，请稍后重试',
   // Turn-error quota CTA (rendered inside the Chat turn-error card when the
   // huaqiu gateway reports `insufficient_user_quota`).
   'turnError.aiQuotaCta': '升级获取更多 AI 额度',
@@ -123,6 +135,18 @@ const en: Record<AuthCopyKey, string> = {
   'subscription.ai': 'AI usage',
   'subscription.aiUsagePercent': '{percent}%',
   'subscription.aiUsageUnknown': 'No data',
+  // Quota-reset grants (sidebar account menu).
+  'subscription.resetLabel': 'Available resets',
+  'subscription.resetCount': '{count}',
+  'subscription.resetAvailable': 'Available resets: {count}',
+  'subscription.resetUse': 'Redeem',
+  'subscription.resetReminder': 'New AI quota reset available',
+  'subscription.resetReminderDismiss': 'Dismiss reminder',
+  'subscription.resetConfirm': 'Use one reset? This resets your plan quota and AI points and cannot be undone.',
+  'subscription.resetConfirmAction': 'Confirm',
+  'subscription.resetCancel': 'Cancel',
+  'subscription.resetBusy': 'Resetting…',
+  'subscription.resetFailed': 'Reset failed, please try again',
   // Turn-error quota CTA (rendered inside the Chat turn-error card when the
   // huaqiu gateway reports `insufficient_user_quota`).
   'turnError.aiQuotaCta': 'Upgrade for more AI tokens',

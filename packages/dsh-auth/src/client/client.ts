@@ -13,6 +13,8 @@ import {
   type AuthMessageEventLike,
   type AuthTokenPayload,
   type LoginOptions,
+  type ResetGrantsView,
+  type ResetUseResultVO,
   type SubscriptionQuota,
 } from './lib.js'
 import { closeLoginDialog, isLoginDialogOpen, openLoginDialog } from './ui/login-dialog.js'
@@ -104,6 +106,20 @@ export interface AuthClient {
      * the same one-round-trip shape as {@link getSubscriptionQuota}.
      */
     getAiTokenUsage(): Promise<AiUsage | null>
+    /**
+     * Pending quota-reset grants for the signed-in account. Resolved by the
+     * NODE half (`GET /api/v1/huaqiu/auth/reset-grants`) against the same
+     * `HQ_AI_ENV` origin the subscription API uses. Null on fetch failure /
+     * no credential — the account menu shows「—」.
+     */
+    getResetGrants(): Promise<ResetGrantsView | null>
+    /**
+     * Consume one pending reset grant (`POST /reset-grants/use`). Callers MUST
+     * re-read {@link getResetGrants} afterwards, even on failure: the upstream
+     * may have consumed the grant before the response was lost. Null on
+     * failure; never throws.
+     */
+    useResetGrant(grantId: number): Promise<ResetUseResultVO | null>
     /**
      * Open the subscription landing page (`gen.eda.cn/subscription` with the
      * token). Host mode: ask the EDA host to open its NATIVE dialog through
@@ -331,6 +347,18 @@ export function createAuthClient(deps: AuthClientDeps): AuthClient {
       // so a request without one is a guaranteed-null round trip.
       if (!(await auth.getAccessToken())) return null
       return transport.fetchAiUsage()
+    },
+    getResetGrants: async (): Promise<ResetGrantsView | null> => {
+      if (hostMode && !hostSessionLoaded) await resolveHost()
+      // Same credential gate as getAiTokenUsage: the node route resolves the
+      // token itself, so a request without one is a guaranteed-null round trip.
+      if (!(await auth.getAccessToken())) return null
+      return (await transport.fetchResetGrants?.()) ?? null
+    },
+    useResetGrant: async (grantId: number): Promise<ResetUseResultVO | null> => {
+      if (hostMode && !hostSessionLoaded) await resolveHost()
+      if (!(await auth.getAccessToken())) return null
+      return (await transport.useResetGrant?.(grantId)) ?? null
     },
     openSubscriptionDialog: async (): Promise<SubscriptionDialogOutcome> => {
       if (hostMode && !hostSessionLoaded) await resolveHost()
